@@ -1,1 +1,3 @@
 run --workspace_status_command="bash tools/workspace-status.sh"
+
+build --host_force_python=PY2
