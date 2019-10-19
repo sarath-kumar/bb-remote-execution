@@ -1,4 +1,4 @@
-DOCKER_BAZEL_IMG=gcr.io/cloud-marketplace-containers/google/bazel
+DOCKER_BAZEL_IMG=gcr.io/cloud-marketplace-containers/google/bazel:1.0.0
 DOCKER_RK_SCHED_IMG=repository-master.rubrik.com:5000/bazel/bb_scheduler
 DOCKER_RK_WORKER_IMG=repository-master.rubrik.com:5000/bazel/bb_worker
 
@@ -19,7 +19,6 @@ all: clean bb-worker bb-scheduler
 .NOTPARALLEL:
 
 bb-worker:
-	mkdir -p $(OUT_DIR)
 	docker run \
 		-v $(SRC_DIR):$(DOCKER_WORK_DIR) \
 		-v $(OUT_DIR):$(DOCKER_OUT_DIR) \
@@ -30,7 +29,6 @@ bb-worker:
 	cp bazel-bin/cmd/bb_worker/$(WORKER_TARGET) $(BAZEL_RESULT_DIR)
 
 bb-scheduler:
-	mkdir -p $(OUT_DIR)
 	docker run \
 		-v $(SRC_DIR):$(DOCKER_WORK_DIR) \
 		-v $(OUT_DIR):$(DOCKER_OUT_DIR) \
