@@ -39,7 +39,7 @@ bb-scheduler:
 	cp bazel-bin/cmd/bb_scheduler/$(SCHEDULER_TARGET) $(BAZEL_RESULT_DIR)
 
 bb-docker-push:
-	$(eval timestamp := $(shell date +%s))
+	$(eval timestamp := $(shell date -u +%Y%m%dT%H%M%SZ))
 	$(eval githash := $(shell git rev-parse --short HEAD))
 	$(eval dockertag := $(timestamp)_$(githash))
 	# TODO/sarath: don't push if githash is the same
