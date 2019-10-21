@@ -6,6 +6,8 @@ SRC_DIR=$(CURDIR)
 DOCKER_WORK_DIR=/src/workspace
 OUT_DIR=/tmp/bazel-output
 DOCKER_OUT_DIR=/tmp/bazel-output
+DOCKER_LOAD_WORKER_IMG=bazel/cmd/bb_worker:bb_worker_container
+DOCKER_LOAD_SCHED_IMG=bazel/cmd/bb_scheduler:bb_scheduler_container
 
 BAZEL_RESULT_DIR=$(CURDIR)/bazel-result
 
@@ -43,10 +45,12 @@ bb-docker-push:
 	$(eval githash := $(shell git rev-parse --short HEAD))
 	$(eval dockertag := $(timestamp)_$(githash))
 	# TODO/sarath: don't push if githash is the same
-	docker import $(BAZEL_RESULT_DIR)/$(SCHEDULER_TARGET) $(DOCKER_RK_SCHED_IMG):$(dockertag)
-	docker import $(BAZEL_RESULT_DIR)/$(WORKER_TARGET) $(DOCKER_RK_WORKER_IMG):$(dockertag)
-	docker push $(DOCKER_RK_SCHED_IMG):$(dockertag)
+	docker load -i $(BAZEL_RESULT_DIR)/$(WORKER_TARGET)
+	docker image tag $(DOCKER_LOAD_WORKER_IMG) $(DOCKER_RK_WORKER_IMG):$(dockertag)
+	docker load -i $(BAZEL_RESULT_DIR)/$(SCHEDULER_TARGET)
+	docker image tag $(DOCKER_LOAD_SCHED_IMG) $(DOCKER_RK_SCHED_IMG):$(dockertag)
 	docker push $(DOCKER_RK_WORKER_IMG):$(dockertag)
+	docker push $(DOCKER_RK_SCHED_IMG):$(dockertag)
 
 clean:
 	rm -rf $(BAZEL_RESULT_DIR) bazel-bin bazel-workspace bazel-testlogs bazel-out
