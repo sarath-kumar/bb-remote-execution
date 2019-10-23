@@ -3,10 +3,6 @@ package builder
 import (
 	"container/heap"
 	"context"
-	"log"
-	"math"
-	"sync"
-
 	remoteexecution "github.com/bazelbuild/remote-apis/build/bazel/remote/execution/v2"
 	"github.com/bazelbuild/remote-apis/build/bazel/semver"
 	"github.com/buildbarn/bb-remote-execution/pkg/proto/scheduler"
@@ -14,6 +10,9 @@ import (
 	"github.com/buildbarn/bb-storage/pkg/util"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/google/uuid"
+	"log"
+	"math"
+	"sync"
 
 	"google.golang.org/genproto/googleapis/longrunning"
 	"google.golang.org/grpc/codes"
@@ -29,9 +28,9 @@ type workerBuildJob struct {
 	executeRequest   remoteexecution.ExecuteRequest
 	insertionOrder   uint64
 
-	stage                   remoteexecution.ExecuteOperationMetadata_Stage
-	executeResponse         *remoteexecution.ExecuteResponse
-	executeTransitionWakeup *sync.Cond
+	stage           remoteexecution.ExecuteOperationMetadata_Stage
+	executeResponse *remoteexecution.ExecuteResponse
+	doneCh          chan struct{}
 }
 
 // workerBuildJobHeap is a heap of workerBuildJob entries, sorted by
@@ -72,39 +71,37 @@ func (h *workerBuildJobHeap) Pop() interface{} {
 }
 
 func (job *workerBuildJob) waitExecution(out remoteexecution.Execution_ExecuteServer) error {
-	for {
-		// Send current state.
-		metadata, err := ptypes.MarshalAny(&remoteexecution.ExecuteOperationMetadata{
-			Stage:        job.stage,
-			ActionDigest: job.actionDigest,
-		})
-		if err != nil {
-			log.Fatal("Failed to marshal execute operation metadata: ", err)
-		}
-		operation := &longrunning.Operation{
-			Name:     job.name,
-			Metadata: metadata,
-		}
-		if job.executeResponse != nil {
-			operation.Done = true
-			response, err := ptypes.MarshalAny(job.executeResponse)
-			if err != nil {
-				log.Fatal("Failed to marshal execute response: ", err)
-			}
-			operation.Result = &longrunning.Operation_Response{Response: response}
-		}
-		if err := out.Send(operation); err != nil {
-			return err
-		}
-
-		// Wait for state transition.
-		// TODO(edsch): Should take a context.
-		// TODO(edsch): Should wake up periodically.
-		if job.executeResponse != nil {
-			return nil
-		}
-		job.executeTransitionWakeup.Wait()
+	// Send update: job received and queued
+	metadata, err := ptypes.MarshalAny(&remoteexecution.ExecuteOperationMetadata{
+		Stage:        job.stage,
+		ActionDigest: job.actionDigest,
+	})
+	if err != nil {
+		log.Fatal("Failed to marshal execute operation metadata: ", err)
 	}
+	operation := &longrunning.Operation{
+		Name:     job.name,
+		Metadata: metadata,
+	}
+	if err := out.Send(operation); err != nil {
+		return err
+	}
+
+	// Wait for job to complete
+	<-job.doneCh
+
+	// Send update: job completed
+	operation.Done = true
+	response, err := ptypes.MarshalAny(job.executeResponse)
+	if err != nil {
+		log.Fatal("Failed to marshal execute response: ", err)
+	}
+	operation.Result = &longrunning.Operation_Response{Response: response}
+	if err := out.Send(operation); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 type workerBuildQueue struct {
@@ -172,6 +169,14 @@ func (bq *workerBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out remo
 	}
 	deduplicationKey := digest.GetKey(bq.deduplicationKeyFormat)
 
+	job, err := bq.enqueueJob(deduplicationKey, in)
+	if err != nil {
+		return err
+	}
+	return job.waitExecution(out)
+}
+
+func (bq *workerBuildQueue) enqueueJob(deduplicationKey string, in *remoteexecution.ExecuteRequest) (*workerBuildJob, error) {
 	bq.jobsLock.Lock()
 	defer bq.jobsLock.Unlock()
 
@@ -179,17 +184,17 @@ func (bq *workerBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out remo
 	if !ok {
 		// TODO(edsch): Maybe let the number of workers influence this?
 		if uint64(bq.jobsPending.Len()) >= bq.jobsPendingMax {
-			return status.Errorf(codes.Unavailable, "Too many jobs pending")
+			return nil, status.Errorf(codes.Unavailable, "Too many jobs pending")
 		}
 
 		job = &workerBuildJob{
-			name:                    uuid.Must(uuid.NewRandom()).String(),
-			actionDigest:            in.ActionDigest,
-			deduplicationKey:        deduplicationKey,
-			executeRequest:          *in,
-			insertionOrder:          bq.nextInsertionOrder,
-			stage:                   remoteexecution.ExecuteOperationMetadata_QUEUED,
-			executeTransitionWakeup: sync.NewCond(&bq.jobsLock),
+			name:             uuid.Must(uuid.NewRandom()).String(),
+			actionDigest:     in.ActionDigest,
+			deduplicationKey: deduplicationKey,
+			executeRequest:   *in,
+			insertionOrder:   bq.nextInsertionOrder,
+			stage:            remoteexecution.ExecuteOperationMetadata_QUEUED,
+			doneCh:           make(chan struct{}),
 		}
 		bq.jobsNameMap[job.name] = job
 		bq.jobsDeduplicationMap[deduplicationKey] = job
@@ -197,7 +202,7 @@ func (bq *workerBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out remo
 		bq.jobsPendingInsertionWakeup.Signal()
 		bq.nextInsertionOrder++
 	}
-	return job.waitExecution(out)
+	return job, nil
 }
 
 func (bq *workerBuildQueue) WaitExecution(in *remoteexecution.WaitExecutionRequest, out remoteexecution.Execution_WaitExecutionServer) error {
@@ -235,6 +240,7 @@ func (bq *workerBuildQueue) GetWork(stream scheduler.Scheduler_GetWorkServer) er
 			bq.jobsPendingInsertionWakeup.Wait()
 		}
 		if err := stream.Context().Err(); err != nil {
+			// Stream got closed, Signal() to wake-up another GetWork() thread (if any)
 			bq.jobsPendingInsertionWakeup.Signal()
 			return err
 		}
@@ -252,6 +258,6 @@ func (bq *workerBuildQueue) GetWork(stream scheduler.Scheduler_GetWorkServer) er
 		delete(bq.jobsDeduplicationMap, job.deduplicationKey)
 		job.stage = remoteexecution.ExecuteOperationMetadata_COMPLETED
 		job.executeResponse = executeResponse
-		job.executeTransitionWakeup.Broadcast()
+		close(job.doneCh)
 	}
 }
