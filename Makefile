@@ -52,5 +52,8 @@ bb-docker-push:
 	docker push $(DOCKER_RK_WORKER_IMG):$(dockertag)
 	docker push $(DOCKER_RK_SCHED_IMG):$(dockertag)
 
+test:
+	bazel test pkg/...
+
 clean:
-	rm -rf $(BAZEL_RESULT_DIR) bazel-bin bazel-workspace bazel-testlogs bazel-out
+	rm -rf $(BAZEL_RESULT_DIR)/$(WORKER_TARGET) $(BAZEL_RESULT_DIR)/$(SCHEDULER_TARGET) bazel-bin bazel-workspace bazel-testlogs bazel-out
