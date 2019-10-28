@@ -10,6 +10,7 @@ import (
 	"github.com/buildbarn/bb-storage/pkg/util"
 	"github.com/golang/protobuf/ptypes"
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 	"log"
 	"math"
 	"sync"
@@ -18,6 +19,27 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+var (
+	workerBuildQueuePendingJobsQueueSizeGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "buildbarn",
+		Subsystem: "worker_build_queue",
+		Name:      "pending_jobs_queue_size_gauge",
+		Help:      "Number of pending jobs in the scheduler queue.",
+	})
+
+	workerBuildQueueRunningJobsGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: "buildbarn",
+		Subsystem: "worker_build_queue",
+		Name:      "runnning_jobs_gauge",
+		Help:      "Number of running jobs.",
+	})
+)
+
+func init() {
+	prometheus.MustRegister(workerBuildQueuePendingJobsQueueSizeGauge)
+	prometheus.MustRegister(workerBuildQueueRunningJobsGauge)
+}
 
 // workerBuildJob holds the information we need to track for a single
 // build action that is enqueued.
@@ -199,6 +221,7 @@ func (bq *workerBuildQueue) enqueueJob(deduplicationKey string, in *remoteexecut
 		bq.jobsNameMap[job.name] = job
 		bq.jobsDeduplicationMap[deduplicationKey] = job
 		heap.Push(&bq.jobsPending, job)
+		workerBuildQueuePendingJobsQueueSizeGauge.Inc()
 		bq.jobsPendingInsertionWakeup.Signal()
 		bq.nextInsertionOrder++
 	}
@@ -247,11 +270,14 @@ func (bq *workerBuildQueue) GetWork(stream scheduler.Scheduler_GetWorkServer) er
 
 		// Extract job from queue.
 		job := heap.Pop(&bq.jobsPending).(*workerBuildJob)
+		workerBuildQueuePendingJobsQueueSizeGauge.Dec()
 		job.stage = remoteexecution.ExecuteOperationMetadata_EXECUTING
 
 		// Perform execution of the job.
 		bq.jobsLock.Unlock()
+		workerBuildQueueRunningJobsGauge.Inc()
 		executeResponse := executeOnWorker(stream, &job.executeRequest)
+		workerBuildQueueRunningJobsGauge.Dec()
 		bq.jobsLock.Lock()
 
 		// Mark completion.
