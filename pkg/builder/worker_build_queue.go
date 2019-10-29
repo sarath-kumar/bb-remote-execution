@@ -21,24 +21,16 @@ import (
 )
 
 var (
-	workerBuildQueuePendingJobsQueueSizeGauge = prometheus.NewGauge(prometheus.GaugeOpts{
+	debugGauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: "buildbarn",
-		Subsystem: "worker_build_queue",
-		Name:      "pending_jobs_queue_size_gauge",
-		Help:      "Number of pending jobs in the scheduler queue.",
-	})
-
-	workerBuildQueueRunningJobsGauge = prometheus.NewGauge(prometheus.GaugeOpts{
-		Namespace: "buildbarn",
-		Subsystem: "worker_build_queue",
-		Name:      "runnning_jobs_gauge",
-		Help:      "Number of running jobs.",
-	})
+		Subsystem: "scheduler",
+		Name:      "worker_build_queue_debug_gauge",
+		Help:      "Debug counters for scheduler worker_build_queue.",
+	}, []string{"gauge_name"})
 )
 
 func init() {
-	prometheus.MustRegister(workerBuildQueuePendingJobsQueueSizeGauge)
-	prometheus.MustRegister(workerBuildQueueRunningJobsGauge)
+	prometheus.MustRegister(debugGauge)
 }
 
 // workerBuildJob holds the information we need to track for a single
@@ -221,7 +213,7 @@ func (bq *workerBuildQueue) enqueueJob(deduplicationKey string, in *remoteexecut
 		bq.jobsNameMap[job.name] = job
 		bq.jobsDeduplicationMap[deduplicationKey] = job
 		heap.Push(&bq.jobsPending, job)
-		workerBuildQueuePendingJobsQueueSizeGauge.Inc()
+		debugGauge.WithLabelValues("jobs_queue_size").Inc()
 		bq.jobsPendingInsertionWakeup.Signal()
 		bq.nextInsertionOrder++
 	}
@@ -270,14 +262,14 @@ func (bq *workerBuildQueue) GetWork(stream scheduler.Scheduler_GetWorkServer) er
 
 		// Extract job from queue.
 		job := heap.Pop(&bq.jobsPending).(*workerBuildJob)
-		workerBuildQueuePendingJobsQueueSizeGauge.Dec()
+		debugGauge.WithLabelValues("jobs_queue_size").Dec()
 		job.stage = remoteexecution.ExecuteOperationMetadata_EXECUTING
 
 		// Perform execution of the job.
 		bq.jobsLock.Unlock()
-		workerBuildQueueRunningJobsGauge.Inc()
+		debugGauge.WithLabelValues("running_jobs").Inc()
 		executeResponse := executeOnWorker(stream, &job.executeRequest)
-		workerBuildQueueRunningJobsGauge.Dec()
+		debugGauge.WithLabelValues("running_jobs").Dec()
 		bq.jobsLock.Lock()
 
 		// Mark completion.
